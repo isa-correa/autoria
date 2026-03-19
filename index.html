@@ -49,27 +49,30 @@
   /* Full-screen video background with slow organic zoom/pan */
   .bg-video-wrap {
     position: absolute;
-    inset: -8%;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .bg-video-wrap video {
+    position: absolute;
+    top: 50%; left: 50%;
     width: 116%;
     height: 116%;
-    overflow: hidden;
+    transform: translate(-50%, -50%) scale(1) translateX(0px) translateY(0px);
+    object-fit: cover;
+    display: block;
     animation: bg-breathe 18s ease-in-out infinite alternate;
     will-change: transform;
   }
 
-  .bg-video-wrap video {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-  }
-
   @keyframes bg-breathe {
-    0%   { transform: scale(1)      translateX(0px)   translateY(0px); }
-    25%  { transform: scale(1.03)   translateX(-10px) translateY(-6px); }
-    50%  { transform: scale(1.05)   translateX(-4px)  translateY(-12px); }
-    75%  { transform: scale(1.03)   translateX(8px)   translateY(-5px); }
-    100% { transform: scale(1.04)   translateX(4px)   translateY(4px); }
+    0%   { transform: translate(-50%, -50%) scale(1)    translateX(0px)   translateY(0px); }
+    25%  { transform: translate(-50%, -50%) scale(1.03) translateX(-10px) translateY(-6px); }
+    50%  { transform: translate(-50%, -50%) scale(1.05) translateX(-4px)  translateY(-12px); }
+    75%  { transform: translate(-50%, -50%) scale(1.03) translateX(8px)   translateY(-5px); }
+    100% { transform: translate(-50%, -50%) scale(1.04) translateX(4px)   translateY(4px); }
   }
 
     /* Dark overlay so UI stays readable */
@@ -616,14 +619,23 @@
   const canvas = document.getElementById('rippleCanvas');
   const ctx2d = canvas.getContext('2d');
 
-  // Canvas is inset: -40px on each side, so canvas = 240x240, disc center = 120,120, disc r = 80px
-  const CX = 120, CY = 120, BASE_R = 80;
+  // BASE_R = disc radius in canvas coords (disc is 160px, canvas extends 70px each side → total 300px)
+  // Canvas center = 150,150 (half of 300). Disc radius in canvas = 80px.
+  let CX = 150, CY = 150, BASE_R = 80;
 
   function resizeCanvas() {
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
+    // Use getBoundingClientRect for accurate size after layout
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width || 300;
+    canvas.height = rect.height || 300;
+    CX = canvas.width / 2;
+    CY = canvas.height / 2;
+    // Disc is 160px wide; canvas is disc + 70px each side = 300px
+    BASE_R = (160 / 300) * canvas.width / 2;
   }
-  resizeCanvas();
+
+  // Defer resize until after first paint so offsetWidth is available
+  requestAnimationFrame(() => { resizeCanvas(); });
   window.addEventListener('resize', resizeCanvas);
 
   const ripples = [];
@@ -633,8 +645,8 @@
     const col = colors[Math.floor(Math.random() * colors.length)];
     ripples.push({
       r: BASE_R + 6,
-      maxR: BASE_R + 30 + energy * 60,
-      opacity: 0.85,
+      maxR: BASE_R + 35 + energy * 70,
+      opacity: 0.9,
       color: col,
       startTime: performance.now()
     });
@@ -663,8 +675,7 @@
   let currentScale = 1;
   let targetScale = 1;
   let lastBeatEnergy = 0;
-  // Lower normalizer so the energy value is much higher (more sensitive)
-  const ENERGY_NORM = 8 * 80; // was 8*200, now 8*80 → energy saturates sooner
+  let peakEnergy = 0.01; // adaptive peak for normalization
 
   function beatLoop() {
     animFrame = requestAnimationFrame(beatLoop);
@@ -674,22 +685,26 @@
 
     analyser.getByteFrequencyData(dataArray);
 
-    // Use bins 1-6 (pure sub-bass, most reactive to kick/bass)
+    // Sum bins 0-15 (sub-bass + bass: 0-688Hz at fftSize=256, sr=44100)
     let bassSum = 0;
-    for (let i = 1; i <= 6; i++) bassSum += dataArray[i];
-    const energy = Math.min(bassSum / ENERGY_NORM, 1);
+    for (let i = 0; i < 16; i++) bassSum += dataArray[i];
+    const rawEnergy = bassSum / 16; // 0-255
 
-    // Beat onset detection with lower threshold
-    const threshold = 0.25;
+    // Adaptive normalization: track rolling peak so quiet songs still react
+    peakEnergy = Math.max(peakEnergy * 0.995, rawEnergy); // slow decay
+    const energy = Math.min(rawEnergy / (peakEnergy * 0.8), 1);
+
+    // Beat onset: rises above 60% of current peak
+    const threshold = 0.55;
     if (energy > threshold && lastBeatEnergy <= threshold) {
       spawnRipple(energy);
     }
     lastBeatEnergy = energy;
 
-    // Much more visible scale punch: 1 → 1.35 at full energy
-    targetScale = 1 + energy * 0.35;
-    // Faster lerp so it snaps to the beat instead of drifting
-    currentScale += (targetScale - currentScale) * 0.45;
+    // Scale punch: snappy attack, slow release
+    targetScale = 1 + energy * 0.38;
+    const lerpSpeed = energy > currentScale - 1 ? 0.5 : 0.12; // fast up, slow down
+    currentScale += (targetScale - currentScale) * lerpSpeed;
     albumArt.style.transform = `translate(-50%, -50%) scale(${currentScale})`;
 
     // Ring spins faster on beat
