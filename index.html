@@ -598,15 +598,22 @@
   let analyser = null;
   let source = null;
   let dataArray = null;
+  let timeDomainArray = null;
   let animFrame = null;
 
   function initAudio() {
     if (audioCtx) return;
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Two analysers: one for frequency (ripples), one time-domain (instant amplitude)
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.8;
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.0; // NO smoothing — raw frame-by-frame
     dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    // Time-domain array for instant RMS volume
+    timeDomainArray = new Float32Array(analyser.fftSize);
+
     source = audioCtx.createMediaElementSource(audio);
     source.connect(analyser);
     analyser.connect(audioCtx.destination);
@@ -675,7 +682,7 @@
   let currentScale = 1;
   let targetScale = 1;
   let lastBeatEnergy = 0;
-  let peakEnergy = 0.01; // adaptive peak for normalization
+  let peakEnergy = 0.001; // adaptive peak — starts tiny so first beats hit hard
 
   function beatLoop() {
     animFrame = requestAnimationFrame(beatLoop);
@@ -683,32 +690,34 @@
 
     if (!analyser) return;
 
-    analyser.getByteFrequencyData(dataArray);
+    // --- Instant RMS from time-domain (super reactive, no smoothing lag) ---
+    analyser.getFloatTimeDomainData(timeDomainArray);
+    let rmsSum = 0;
+    for (let i = 0; i < timeDomainArray.length; i++) {
+      rmsSum += timeDomainArray[i] * timeDomainArray[i];
+    }
+    const rms = Math.sqrt(rmsSum / timeDomainArray.length); // 0.0 – ~0.5
 
-    // Sum bins 0-15 (sub-bass + bass: 0-688Hz at fftSize=256, sr=44100)
-    let bassSum = 0;
-    for (let i = 0; i < 16; i++) bassSum += dataArray[i];
-    const rawEnergy = bassSum / 16; // 0-255
+    // Adaptive peak: follows the loudest moments, decays slowly
+    peakEnergy = Math.max(peakEnergy * 0.992, rms);
+    // Normalize: 0 at silence, 1 at peak. Boost by dividing by 70% of peak.
+    const energy = Math.min(rms / (peakEnergy * 0.7 + 0.001), 1);
 
-    // Adaptive normalization: track rolling peak so quiet songs still react
-    peakEnergy = Math.max(peakEnergy * 0.995, rawEnergy); // slow decay
-    const energy = Math.min(rawEnergy / (peakEnergy * 0.8), 1);
-
-    // Beat onset: rises above 60% of current peak
-    const threshold = 0.55;
+    // Beat onset: RMS rises sharply above threshold
+    const threshold = 0.4;
     if (energy > threshold && lastBeatEnergy <= threshold) {
       spawnRipple(energy);
     }
     lastBeatEnergy = energy;
 
-    // Scale punch: snappy attack, slow release
-    targetScale = 1 + energy * 0.38;
-    const lerpSpeed = energy > currentScale - 1 ? 0.5 : 0.12; // fast up, slow down
+    // Scale: 1.0 at silence → 1.45 at full energy. Snappy attack, slow decay.
+    targetScale = 1 + energy * 0.45;
+    const lerpSpeed = targetScale > currentScale ? 0.6 : 0.08;
     currentScale += (targetScale - currentScale) * lerpSpeed;
     albumArt.style.transform = `translate(-50%, -50%) scale(${currentScale})`;
 
-    // Ring spins faster on beat
-    const ringSpeed = Math.max(0.3, 6 - energy * 5.5);
+    // Ring spins faster on loud beats
+    const ringSpeed = Math.max(0.25, 6 - energy * 5.5);
     albumRing.style.animationDuration = ringSpeed + 's';
   }
 
